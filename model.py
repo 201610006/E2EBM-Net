@@ -9,7 +9,6 @@ import numpy as np
 from einops import rearrange
 
 from functools import partial
-
 nonlinearity = partial(F.relu, inplace=True)
 # CBR
 class CBR(nn.Module):
