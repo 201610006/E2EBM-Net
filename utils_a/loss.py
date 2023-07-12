@@ -74,7 +74,7 @@ def bbox_cos(box1, box2, grid_xy, x1y1x2y2=True, eps=1e-9):
         t_x1, t_y1 = box2[0] + grid_xy[0].float(), box2[1] + grid_xy[1].float()
         p_x1, p_y1 = box1[0] + grid_xy[0].float(), box1[1] + grid_xy[1].float()
 
-    with torch.no_grad():  # 去掉梯度，只计算值
+    with torch.no_grad():  
         aain = []
         for i in range(0, t_x1.shape[0]//2):
             aain.append(2*i+1)
