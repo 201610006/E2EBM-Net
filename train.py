@@ -71,6 +71,37 @@ def _create_validation_data_loader(img_path, batch_size, img_size, n_cpu):
         collate_fn=dataset.collate_fn)
     return dataloader
 
+def _neg_loss(preds, targets):
+    ''' Modified focal loss. Exactly the same as CornerNet.
+        Runs faster and costs a little bit more memory
+        Arguments:
+        preds (B x c x h x w)
+        gt_regr (B x c x h x w)
+    '''
+    af = 0.95
+    #pos_inds = targets.eq(1).float()
+    pos_inds = targets.gt(af).float()
+    neg_inds = targets.lt(af).float()
+
+    neg_weights = torch.pow(1 - targets, 4)
+
+    loss = 0
+    for pred in preds: 
+
+        pred = torch.clamp(torch.sigmoid(pred), min=1e-4, max=1 - 1e-4)
+        pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
+        neg_loss = torch.log(1 - pred) * torch.pow(pred,
+                                                   2) * neg_weights * neg_inds
+        num_pos = pos_inds.float().sum()
+        pos_loss = pos_loss.sum()
+        neg_loss = neg_loss.sum()
+
+        if num_pos == 0:
+            loss = loss - neg_loss 
+        else:
+            loss = loss - (pos_loss + neg_loss) / num_pos
+    return loss / len(preds)
+
 def run():
     print_environment_info()
     parser = argparse.ArgumentParser(description="Trains the My model.")
@@ -78,8 +109,8 @@ def run():
     parser.add_argument("-e", "--epochs", type=int, default=1000, help="Number of epochs")
     parser.add_argument("-v", "--verbose", action='store_true',default=False, help="Makes the training more verbose")
     parser.add_argument("--n_cpu", type=int, default=8, help="Number of cpu threads to use during batch generation")
-    parser.add_argument("--model_weights", type=str, default="checkpoints2/best_ckpt_7.pth", help="Path to model weights for training")
-    parser.add_argument("--pretrained_weights", type=str, default="pretrained_weights/resnet50.pth", help="Path to checkpoint file (.weights or .pth). Starts training from checkpoint model")
+    parser.add_argument("--model_weights", type=str, default="checkpoints2/best_ckpt_28.pth", help="Path to model weights for training")
+    parser.add_argument("--pretrained_weights", type=str, default="pretrained_weights/resnet34.pth", help="Path to checkpoint file (.weights or .pth). Starts training from checkpoint model")
     parser.add_argument("--checkpoint_interval", type=int, default=1, help="Interval of epochs between saving model weights")
     parser.add_argument("--evaluation_interval", type=int, default=1, help="Interval of epochs between evaluations on validation set")
     parser.add_argument("--multiscale_training", action="store_true", help="Allow multi-scale training")
@@ -184,8 +215,8 @@ def run():
 
             outputs, htm = model(imgs)
             dloss, loss_components = criterion(outputs, targets)
-
-            htl = criterion2(htm, htmap)
+            htl = _neg_loss(htm, htmap)
+            # htl = criterion2(htm, htmap)
 
             loss = dloss + 1e-2*htl
             loss.backward()
