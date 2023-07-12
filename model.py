@@ -1,14 +1,10 @@
-'''FPN in PyTorch.
-See the paper "Feature Pyramid Networks for Object Detection" for more details.
-'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models.resnet import ResNet
 
 from torch.autograd import Variable
-from backbone.resnet import ResNet50, ResNet101
-import matplotlib.pyplot as plt
+from backbone.Resnet import resnet18, resnet34, resnet50
 import numpy as np
 from einops import rearrange
 
@@ -97,16 +93,18 @@ class CSP(nn.Module):
     def __init__(self, in_channels, out_channels, nblocks):
         super(CSP, self).__init__()
         self.CBM1 = CBM(in_channels, out_channels, kernel_size=1, stride=1)
-        self.CBM2 = CBM(in_channels, out_channels, kernel_size=1, stride=1)
+        # self.CBM2 = CBM(in_channels, out_channels, kernel_size=1, stride=1)
         self.CBM3 = CBM(out_channels, out_channels, kernel_size=1, stride=1)
         self.Res_unit = Res_unit(out_channels, nblocks=nblocks)
+        self.Conv1 = nn.Conv2d(2 * out_channels, out_channels, 1, 1)
 
     def forward(self, x):
-        x1 = self.CBM1(x)
-        x1 = self.Res_unit(x1)
+        x1_0 = self.CBM1(x)
+        x1 = self.Res_unit(x1_0)
         x1 = self.CBM3(x1)
-        x2 = self.CBM2(x)
-        x = torch.cat([x1,x2], dim=1)
+        # x2 = self.CBM2(x)
+        x = torch.cat([x1,x1_0], dim=1)
+        x = self.Conv1(x)
         return x
 
 class Mish(torch.nn.Module):
@@ -118,11 +116,12 @@ class Mish(torch.nn.Module):
         return x
 
 def build_backbone(back_bone, pretrained=False):
-
+    if back_bone == "resnet34":
+        return resnet34(pretrained=pretrained)
     if back_bone == "resnet50":
-        return ResNet50(pretrained=pretrained)
-    if back_bone == "resnet101":
-        return ResNet101(pretrained=pretrained)
+        return resnet50(pretrained=pretrained)
+    if back_bone == "resnet18":
+        return resnet18(pretrained=pretrained)
 
 
 class ChannelAttention(nn.Module):
@@ -216,17 +215,18 @@ class Feature_fusion(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
 
-        self.conv = nn.ModuleList()
-        self.conv.append(nn.Conv2d(in_channels, out_channels, 1, 1))
-        self.conv.append(nn.Conv2d(out_channels, out_channels, 3, 1, 1))
-        self.conv.append(nn.Conv2d(out_channels, out_channels, 3, 1, 1))
-        self.conv.append(nn.Conv2d(out_channels, out_channels, 1, 1))
-        self.conv.append(nn.BatchNorm2d(out_channels))
-        self.conv.append(nn.ReLU(inplace=False))
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1, 1)
+        self.conv_c1 = Conv_Bn_Activation(out_channels, out_channels, 3, 1, 'relu')
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 1, 1)
+        # self.conv_c2 = Conv_Bn_Activation(out_channels, out_channels, 3, 1, 'relu')
     def forward(self, x):
-        for l in self.conv:
-            x = l(x)
-        return x
+        #for l in self.conv:
+        #    x = l(x)
+        x = self.conv1(x)
+        x1 = self.conv_c1(x)
+        x2 = self.conv2(x1)
+        # x2 = self.conv_c2(x2)
+        return x+x2
 
 class Upsample(nn.Module):
     def __init__(self):
@@ -317,8 +317,27 @@ class Decoupling(nn.Module):
 
         return out
 
+
+class Decouple_mds(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(Decouple_mds, self).__init__()
+
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=1, stride=1)
+
+        self.conv2 = Conv_Bn_Activation(in_channels, in_channels, 3, 1, 'relu')
+
+        self.out = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=1)
+
+    def forward(self, x):
+
+        x = self.conv1(x)
+        x = self.conv2(x)
+        out = self.out(x)
+        return out
+
+
 class MeasureNet(nn.Module):
-    def __init__(self, back_bone='resnet50',
+    def __init__(self, back_bone='resnet34',
                  pretrained=False,
                  anchors = 3,
                  nblock = 1,
@@ -331,77 +350,71 @@ class MeasureNet(nn.Module):
 
         self.back_bone = build_backbone(back_bone, pretrained)
 
-        self.get_feature_c5 = CSP(2048, 256, self.nblock)
-        self.get_feature_c4 = CSP(1024, 256, self.nblock)
-        self.get_feature_c3 = CSP(512, 256, self.nblock)
+        self.get_feature_c4 = CSP(512 + 256, 256, self.nblock)
 
-        self.conv_c34 = nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1)
-        self.conv_c35 = nn.Conv2d(512, 512, kernel_size=5, stride=4, padding=1)
-        self.conv_c45 = nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1)
+        self.get_feature_c3 = CSP(256 + 128, 256, self.nblock)
 
-        self.fusion_c5 = Feature_fusion(512, 256)
-        self.fusion_c4 = Feature_fusion(512, 256)
-        self.fusion_c3 = Feature_fusion(512, 256)
+        self.get_feature_c4_2 = CSP(256 + 256, 256, self.nblock)
 
-        self.level3 = CSP(256, 128, 1)
-        self.level4 = CSP(512, 128, 1)
-        self.level5 = CSP(512, 128, 1)
+        self.get_feature_c5 = CSP(256 + 512, 256, self.nblock)
 
-        self.ht_c5 = Conv_Bn_Activation(256, 64, 1, 1, 'relu')
+        self.at_f_c5 = CBAM(256)
+        self.at_f_c4 = CBAM(256)
+        self.at_f_c3 = CBAM(256)
+
+        self.level3 = Feature_fusion(512, 256)
+        self.level4 = Feature_fusion(512, 256)
+        self.level5 = Feature_fusion(512, 256)
+
+        self.ht_c5 = Conv_Bn_Activation(512, 64, 1, 1, 'relu')
         self.ht_c4 = Conv_Bn_Activation(256, 64, 1, 1, 'relu')
-        self.ht_c3 = Conv_Bn_Activation(256, 64, 1, 1, 'relu')
-        self.ht_at = CBAM(64)
+        self.ht_c3 = Conv_Bn_Activation(128, 64, 1, 1, 'relu')
         self.ht_out = nn.Conv2d(64, 2, kernel_size=1, stride=1)
 
-        self.c_l3 = Conv_Bn_Activation(256, 256, 3, 2, 'relu')
-        self.c_l4 = Conv_Bn_Activation(256, 256, 3, 2, 'relu')
-
-        self.out1 = nn.Conv2d(256, self.no * 3, kernel_size=1, stride=1)
-        self.out3 = nn.Conv2d(256, self.no * 3, kernel_size=1, stride=1)
-        self.out2 = nn.Conv2d(256, self.no * 3, kernel_size=1, stride=1)
+        self.out1 = Decouple_mds(256, self.no * 3)
+        self.out2 = Decouple_mds(256, self.no * 3)
+        self.out3 = Decouple_mds(256, self.no * 3)
 
     def forward(self, x):
         low_level_features = self.back_bone(x)
-        c5 = low_level_features[0]  
-        c4 = low_level_features[1]  
-        c3 = low_level_features[2]  
-        c2 = low_level_features[3]  
+        c5 = low_level_features[0]  # [2, 512, 13, 13]
+        c4 = low_level_features[1]  # [2, 256, 26, 26]
+        c3 = low_level_features[2]  # [2, 128, 52, 52]
+        c2 = low_level_features[3]  # [2, 64, 104, 104]
 
-        feature_c5 = self.get_feature_c5(c5) 
-        feature_c4 = self.get_feature_c4(c4) 
-        feature_c3 = self.get_feature_c3(c3) 
 
-        fusion_c5 = feature_c5 + self.conv_c35(feature_c3) + self.conv_c45(feature_c4)
-        fusion_c5 = self.fusion_c5(fusion_c5)
-        fusion_c4 = feature_c4 + self.conv_c34(feature_c3) + F.interpolate(feature_c5, scale_factor=2, mode='bilinear')
-        fusion_c4 = self.fusion_c4(fusion_c4)
-        fusion_c3 = feature_c3 + F.interpolate(feature_c4, scale_factor=2, mode='bilinear') + F.interpolate(feature_c5, scale_factor=4, mode='bilinear')
-        fusion_c3 = self.fusion_c3(fusion_c3)
+        feature_c4 = torch.cat([F.interpolate(c5, scale_factor=2, mode='bilinear'), c4], 1)
+        feature_c4 = self.get_feature_c4(feature_c4) #[2, 512, 13, 13]
 
-        htm = self.ht_c3(fusion_c3) + self.ht_c4(
-            F.interpolate(fusion_c4, scale_factor=2, mode='bilinear')) + self.ht_c5(
-            F.interpolate(fusion_c5, scale_factor=4, mode='bilinear'))
-        htm = self.ht_at(htm)
+        feature_c3 = torch.cat([F.interpolate(feature_c4, scale_factor=2, mode='bilinear'), c3], 1)
+        feature_c3 = self.get_feature_c3(feature_c3)
+
+        feature_c4 = torch.cat([F.interpolate(feature_c3, scale_factor=0.5, mode='bilinear'), feature_c4], 1)
+        feature_c4 = self.get_feature_c4_2(feature_c4)
+
+        feature_c5 = torch.cat([F.interpolate(feature_c4, scale_factor=0.5, mode='bilinear'), c5], 1)
+        feature_c5 = self.get_feature_c5(feature_c5)
+
+
+        htm = F.interpolate(self.ht_c5(c5), scale_factor=4, mode='bilinear') + F.interpolate(self.ht_c4(c4), scale_factor=2, mode='bilinear') + self.ht_c3(c3)
         htm = torch.sigmoid(self.ht_out(htm))
         htm_out = F.interpolate(htm, scale_factor=2, mode='bilinear')
         htm = htm.sum(dim=1, keepdim=True)
 
-        l3 = fusion_c3 * htm
-        l4 = fusion_c4 * F.interpolate(htm, scale_factor=0.5, mode='bilinear')
-        l5 = fusion_c5 * F.interpolate(htm, scale_factor=0.25, mode='bilinear')
+        l3 = feature_c3 * htm
+        l3_a = self.at_f_c3(feature_c3)
+        out1 = self.level3(torch.cat([l3, l3_a], 1))
+        out1 = self.out1(out1)
 
-        l3 = self.level3(l3)
-        out1 = self.out1(l3)
+        l4 = feature_c4 * F.interpolate(htm, scale_factor=0.5, mode='bilinear')
+        l4_a = self.at_f_c4(feature_c4)
+        out2 = self.level4(torch.cat([l4, l4_a], 1))
+        out2 = self.out2(out2)
 
-        l3 = self.c_l3(l3)
-        l4 = torch.cat([l3,l4],1)
-        l4 = self.level4(l4)
-        out2 = self.out2(l4)
-
-        l4 = self.c_l4(l4)
-        l5 = torch.cat([l4, l5], 1)
-        l5 = self.level5(l5)
-        out3 = self.out3(l5)
+        l5 = feature_c5 * F.interpolate(htm, scale_factor=0.25, mode='bilinear')
+        l5_a = self.at_f_c5(feature_c5)
+        out3 = self.level5(torch.cat([l5, l5_a], 1))
+        out3 = self.out3(out3)
 
         bs, _, _, _ = x.shape
         out1 = out1.view(bs, self.anchors, self.no, out1.shape[-2], out1.shape[-1]).permute(0, 1, 3, 4, 2)
